@@ -11,6 +11,9 @@ import math
 import scitbx
 from LS49.sim.util_fmodel import gen_fmodel
 import os
+import time
+from mpi4py import MPI
+comm = MPI.COMM_WORLD
 
 big_data = "." # directory location for reference files
 def full_path(filename):
@@ -114,7 +117,7 @@ def channel_pixels(wavelength_A,flux,N,UMAT_nm,Amatrix_rot,fmodel_generator,loca
   temp=SIM.Ncells_abc
   if rank==7: print("Ncells_abc=",SIM.Ncells_abc)
   SIM.Ncells_abc=temp
-
+  
   from libtbx.development.timers import Profiler
   if rank==7: P = Profiler("nanoBragg C++ rank %d"%(rank))
   if add_spots_algorithm == "NKS":
@@ -136,12 +139,13 @@ from LS49.sim.debug_utils import channel_extractor
 CHDBG_singleton = channel_extractor()
 
 def run_sim2smv(prefix,crystal,spectra,rotation,rank,quick=False,save_bragg=False):
+  debug_t0 = time.time()
   local_data = data()
   smv_fileout = prefix + ".img"
-  if not quick:
-    if not write_safe(smv_fileout):
-      print("File %s already exists, skipping in rank %d"%(smv_fileout,rank))
-      return
+  #if not quick:
+  #  if not write_safe(smv_fileout):
+  #    print("File %s already exists, skipping in rank %d"%(smv_fileout,rank))
+  #    return
 
   direct_algo_res_limit = 1.7
 
@@ -151,28 +155,28 @@ def run_sim2smv(prefix,crystal,spectra,rotation,rank,quick=False,save_bragg=Fals
     wavlen = flex.double([wavelength_A]);
     flux = flex.double([flex.sum(flux)])
     print("Quick sim, lambda=%f, flux=%f"%(wavelength_A,flux[0]))
-
+  
   GF = gen_fmodel(resolution=direct_algo_res_limit,pdb_text=local_data.get("pdb_lines"),algorithm="fft",wavelength=wavelength_A)
   GF.set_k_sol(0.435)
   GF.make_P1_primitive()
   sfall_main = GF.get_amplitudes()
-
+  
   # use crystal structure to initialize Fhkl array
   sfall_main.show_summary(prefix = "Amplitudes used ")
   N = crystal.number_of_cells(sfall_main.unit_cell())
-
+  
   #SIM = nanoBragg(detpixels_slowfast=(2000,2000),pixel_size_mm=0.11,Ncells_abc=(5,5,5),verbose=0)
   SIM = nanoBragg(detpixels_slowfast=(3000,3000),pixel_size_mm=0.11,Ncells_abc=(N,N,N),
     # workaround for problem with wavelength array, specify it separately in constructor.
     wavelength_A=wavelength_A,verbose=0)
   SIM.adc_offset_adu = 0 # Do not offset by 40
   SIM.adc_offset_adu = 10 # Do not offset by 40
-  import sys
-  if len(sys.argv)>2:
-    SIM.seed = -int(sys.argv[2])
-    print("GOTHERE seed=",SIM.seed)
-  if len(sys.argv)>1:
-    if sys.argv[1]=="random" : SIM.randomize_orientation()
+  #import sys
+  #if len(sys.argv)>2:
+  #  SIM.seed = -int(sys.argv[2])
+  #  print("GOTHERE seed=",SIM.seed)
+  #if len(sys.argv)>1:
+  #  if sys.argv[1]=="random" : SIM.randomize_orientation()
   SIM.mosaic_spread_deg = 0.05 # interpreted by UMAT_nm as a half-width stddev
   SIM.mosaic_domains = 25  # 77 seconds.  With 100 energy points, 7700 seconds (2 hours) per image
                            # 3000000 images would be 100000 hours on a 60-core machine (dials), or 11.4 years
@@ -191,6 +195,7 @@ def run_sim2smv(prefix,crystal,spectra,rotation,rank,quick=False,save_bragg=Fals
     site = col(mersenne_twister.random_double_point_on_sphere())
     UMAT_nm.append( site.axis_and_angle_as_r3_rotation_matrix(m,deg=False) )
   SIM.set_mosaic_blocks(UMAT_nm)
+
 
   #SIM.detector_thick_mm = 0.5 # = 0 for Rayonix
   #SIM.detector_thicksteps = 1 # should default to 1 for Rayonix, but set to 5 for CSPAD
@@ -223,7 +228,7 @@ def run_sim2smv(prefix,crystal,spectra,rotation,rank,quick=False,save_bragg=Fals
   from cctbx import crystal_orientation
   Ori = crystal_orientation.crystal_orientation(Amat, crystal_orientation.basis_type.reciprocal)
   print("Python unit cell from SIM state",Ori.unit_cell())
-
+  
   # fastest option, least realistic
   #SIM.xtal_shape=shapetype.Tophat # RLP = hard sphere
   #SIM.xtal_shape=shapetype.Square # gives fringes
@@ -302,12 +307,13 @@ def run_sim2smv(prefix,crystal,spectra,rotation,rank,quick=False,save_bragg=Fals
   print("default_F=",SIM.default_F)
   print("interpolate=",SIM.interpolate)
   print("integral_form=",SIM.integral_form)
-
+  
   # simulated crystal is only 125 unit cells (25 nm wide)
   # amplify spot signal to simulate physical crystal of 4000x larger: 100 um (64e9 x the volume)
   print(crystal.domains_per_crystal)
   SIM.raw_pixels *= crystal.domains_per_crystal; # must calculate the correct scale!
-
+  
+  debug_t1 = time.time()
   for x in range(len(flux)):
     from libtbx.development.timers import Profiler
     if rank==7: P = Profiler("nanoBragg Python and C++ rank %d"%(rank))
@@ -319,11 +325,14 @@ def run_sim2smv(prefix,crystal,spectra,rotation,rank,quick=False,save_bragg=Fals
     CH.free_all()
 
     if rank==7: del P
-
+  
+  debug_t2 = time.time()
   # image 1: crystal Bragg scatter
   if quick or save_bragg:  SIM.to_smv_format(fileout=prefix + "_intimage_001.img")
 
   if save_bragg: raw_to_pickle(SIM.raw_pixels, fileout=prefix + "_dblprec_001.pickle")
+
+  debug_t3 = time.time()
 
   # rough approximation to water: interpolation points for sin(theta/lambda) vs structure factor
   bg = flex.vec2_double([(0,2.57),(0.0365,2.58),(0.07,2.8),(0.12,5),(0.162,8),(0.2,6.75),(0.18,7.32),(0.216,6.75),(0.236,6.5),(0.28,4.5),(0.3,4.3),(0.345,4.36),(0.436,3.77),(0.5,3.17)])
@@ -337,6 +346,8 @@ def run_sim2smv(prefix,crystal,spectra,rotation,rank,quick=False,save_bragg=Fals
   SIM.add_background()
   if quick:  SIM.to_smv_format(fileout=prefix + "_intimage_002.img")
 
+  debug_t4  = time.time()
+
   # rough approximation to air
   bg = flex.vec2_double([(0,14.1),(0.045,13.5),(0.174,8.35),(0.35,4.78),(0.5,4.22)])
   SIM.Fbg_vs_stol = bg
@@ -349,7 +360,8 @@ def run_sim2smv(prefix,crystal,spectra,rotation,rank,quick=False,save_bragg=Fals
   print("amorphous_density_gcm3=",SIM.amorphous_density_gcm3)
   print("amorphous_molecular_weight_Da=",SIM.amorphous_molecular_weight_Da)
   SIM.add_background()
-
+  
+  debug_t5 = time.time()
   #apply beamstop mask here
 
   # set this to 0 or -1 to trigger automatic radius.  could be very slow with bright images
@@ -379,10 +391,12 @@ def run_sim2smv(prefix,crystal,spectra,rotation,rank,quick=False,save_bragg=Fals
   print("detector_psf_kernel_radius_pixels=",SIM.detector_psf_kernel_radius_pixels)
   SIM.add_noise() #converts phtons to ADU.
 
+  debug_t6 = time.time()
   print("raw_pixels=",SIM.raw_pixels)
   extra = "PREFIX=%s;\nRANK=%d;\n"%(prefix,rank)
   SIM.to_smv_format_py(fileout=smv_fileout,intfile_scale=1,rotmat=True,extra=extra,gz=True)
-
+  
+  debug_t7 = time.time()
   # try to write as CBF
   if False:
     import dxtbx
@@ -393,6 +407,8 @@ def run_sim2smv(prefix,crystal,spectra,rotation,rank,quick=False,save_bragg=Fals
     detector=img.get_detector(),beam=img.get_beam(),gonio=img.get_goniometer(),scan=img.get_scan(),
     data=img.get_raw_data(),path=prefix + ".cbf")
   SIM.free_all()
+  print('DEBUGXX', debug_t1-debug_t0, debug_t2-debug_t1, debug_t3-debug_t2, debug_t4-debug_t3, debug_t5-debug_t4, debug_t6-debug_t5, debug_t7-debug_t6)
+
 
 def tst_all(quick=False,prefix="step5",save_bragg=False):
   from LS49.spectra.generate_spectra import spectra_simulation

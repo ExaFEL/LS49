@@ -9,8 +9,9 @@ import libtbx.load_env # possibly implicit
 from cctbx import crystal
 import math
 import scitbx
-from LS49.sim.util_fmodel import gen_fmodel
+#from LS49.sim.util_fmodel import gen_fmodel
 import os
+
 import time
 from mpi4py import MPI
 comm = MPI.COMM_WORLD
@@ -79,14 +80,19 @@ def write_safe(fname):
   return (not os.path.isfile(fname)) and (not os.path.isfile(fname+".gz"))
 
 add_spots_algorithm = str(os.environ.get("ADD_SPOTS_ALGORITHM"))
-def channel_pixels(wavelength_A,flux,N,UMAT_nm,Amatrix_rot,fmodel_generator,local_data,rank):
-  fmodel_generator.reset_wavelength(wavelength_A)
-  fmodel_generator.reset_specific_at_wavelength(
-                   label_has="FE1",tables=local_data.get("Fe_oxidized_model"),newvalue=wavelength_A)
-  fmodel_generator.reset_specific_at_wavelength(
-                   label_has="FE2",tables=local_data.get("Fe_reduced_model"),newvalue=wavelength_A)
+def channel_pixels(wavelength_A,flux,N,UMAT_nm,Amatrix_rot,local_data,rank,sfall_channel):
+  #t0 = time.time()
+  #fmodel_generator.reset_wavelength(wavelength_A)
+  #fmodel_generator.reset_specific_at_wavelength(
+  #                 label_has="FE1",tables=local_data.get("Fe_oxidized_model"),newvalue=wavelength_A)
+  #fmodel_generator.reset_specific_at_wavelength(
+  #                 label_has="FE2",tables=local_data.get("Fe_reduced_model"),newvalue=wavelength_A)
+
+  #t1 = time.time()
   if rank==7: print("USING scatterer-specific energy-dependent scattering factors")
-  sfall_channel = fmodel_generator.get_amplitudes()
+  #sfall_channel = fmodel_generator.get_amplitudes()
+  #t2 = time.time()
+  #print(wavelength_A, flux, sfall_channel.size())
   SIM = nanoBragg(detpixels_slowfast=(3000,3000),pixel_size_mm=0.11,Ncells_abc=(N,N,N),
     wavelength_A=wavelength_A,verbose=0)
   SIM.adc_offset_adu = 10 # Do not offset by 40
@@ -118,6 +124,8 @@ def channel_pixels(wavelength_A,flux,N,UMAT_nm,Amatrix_rot,fmodel_generator,loca
   if rank==7: print("Ncells_abc=",SIM.Ncells_abc)
   SIM.Ncells_abc=temp
   
+  #t3 = time.time()
+
   from libtbx.development.timers import Profiler
   if rank==7: P = Profiler("nanoBragg C++ rank %d"%(rank))
   if add_spots_algorithm == "NKS":
@@ -133,14 +141,16 @@ def channel_pixels(wavelength_A,flux,N,UMAT_nm,Amatrix_rot,fmodel_generator,loca
     SIM.add_nanoBragg_spots_cuda()
   else: raise Exception("unknown spots algorithm")
   if rank==7: del P
+  #t4 = time.time()
+  #print("DEBUGXA",t3-t0, t4-t3, t4-t0)
   return SIM
 
 from LS49.sim.debug_utils import channel_extractor
 CHDBG_singleton = channel_extractor()
 
-def run_sim2smv(prefix,crystal,spectra,rotation,rank,quick=False,save_bragg=False):
+def run_sim2smv(prefix,crystal,spectra_iter,rotation,rank,quick=False,save_bragg=False,sfall_main=None, local_data=None, sfall_channels=None):
   debug_t0 = time.time()
-  local_data = data()
+  #local_data = data()
   smv_fileout = prefix + ".img"
   #if not quick:
   #  if not write_safe(smv_fileout):
@@ -149,17 +159,17 @@ def run_sim2smv(prefix,crystal,spectra,rotation,rank,quick=False,save_bragg=Fals
 
   direct_algo_res_limit = 1.7
 
-  wavlen, flux, wavelength_A = next(spectra) # list of lambdas, list of fluxes, average wavelength
+  wavlen, flux, wavelength_A = next(spectra_iter) # list of lambdas, list of fluxes, average wavelength
   assert wavelength_A > 0
   if quick:
     wavlen = flex.double([wavelength_A]);
     flux = flex.double([flex.sum(flux)])
     print("Quick sim, lambda=%f, flux=%f"%(wavelength_A,flux[0]))
   
-  GF = gen_fmodel(resolution=direct_algo_res_limit,pdb_text=local_data.get("pdb_lines"),algorithm="fft",wavelength=wavelength_A)
-  GF.set_k_sol(0.435)
-  GF.make_P1_primitive()
-  sfall_main = GF.get_amplitudes()
+  #GF = gen_fmodel(resolution=direct_algo_res_limit,pdb_text=local_data.get("pdb_lines"),algorithm="fft",wavelength=wavelength_A)
+  #GF.set_k_sol(0.435)
+  #GF.make_P1_primitive()
+  #sfall_main = GF.get_amplitudes()
   
   # use crystal structure to initialize Fhkl array
   sfall_main.show_summary(prefix = "Amplitudes used ")
@@ -181,6 +191,7 @@ def run_sim2smv(prefix,crystal,spectra,rotation,rank,quick=False,save_bragg=Fals
   SIM.mosaic_domains = 25  # 77 seconds.  With 100 energy points, 7700 seconds (2 hours) per image
                            # 3000000 images would be 100000 hours on a 60-core machine (dials), or 11.4 years
                            # using 2 nodes, 5.7 years.  Do this at SLAC? NERSC? combination of all?
+  #iterator = spectra.generate_recast_renormalized_image(image=image,energy=7120.,total_flux=1e12)
                            # SLAC downtimes: Tues Dec 5 (24 hrs), Mon Dec 11 (72 hrs), Mon Dec 18 light use, 24 days
                            # mosaic_domains setter must come after mosaic_spread_deg setter
   SIM.distance_mm=141.7
@@ -319,7 +330,7 @@ def run_sim2smv(prefix,crystal,spectra,rotation,rank,quick=False,save_bragg=Fals
     if rank==7: P = Profiler("nanoBragg Python and C++ rank %d"%(rank))
 
     if rank==7: print("+++++++++++++++++++++++++++++++++++++++ Wavelength",x)
-    CH = channel_pixels(wavlen[x],flux[x],N,UMAT_nm,Amatrix_rot,GF,local_data,rank)
+    CH = channel_pixels(wavlen[x],flux[x],N,UMAT_nm,Amatrix_rot,local_data,rank,sfall_channels[x])
     SIM.raw_pixels += CH.raw_pixels * crystal.domains_per_crystal
     CHDBG_singleton.extract(channel_no=x, data=CH.raw_pixels)
     CH.free_all()

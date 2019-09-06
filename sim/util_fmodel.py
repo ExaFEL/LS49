@@ -84,14 +84,14 @@ def fmodel_from_pdb(resolution,pdb_text,algorithm=None,wavelength=0.9):
 
 class gen_fmodel(object):
   def __init__(self,resolution,pdb_text,algorithm=None,wavelength=0.9):
-    import time
-    t0 = time.time()
+    #import time
+    #t0 = time.time()
     from iotbx import pdb
     pdb_inp = pdb.input(source_info=None,lines = pdb_text)
-    t1 = time.time()
+    #t1 = time.time()
     xray_structure = pdb_inp.xray_structure_simple()
     xray_structure.show_summary(prefix="Input structure ")
-    t2 = time.time()
+    #t2 = time.time()
     #
     # take a detour to insist on calculating anomalous contribution of every atom
     scatterers = xray_structure.scatterers()
@@ -101,7 +101,7 @@ class gen_fmodel(object):
       expected_henke = henke.table(sc.element_symbol()).at_angstrom(wavelength)
       sc.fp = expected_henke.fp()
       sc.fdp = expected_henke.fdp()
-    t3 = time.time()
+    #t3 = time.time()
 
     import mmtbx.command_line.fmodel
     phil2 = mmtbx.command_line.fmodel.fmodel_from_xray_structure_master_params
@@ -116,8 +116,8 @@ class gen_fmodel(object):
     params2.structure_factors_accuracy.algorithm = algorithm
     self.params2 = params2
     self.xray_structure = xray_structure
-    t4 = time.time()
-    print("DEBUGXZ", t1-t0, t2-t1, t3-t2, t4-t3)
+    #t4 = time.time()
+    #print("DEBUGXZ", t1-t0, t2-t1, t3-t2, t4-t3)
   def make_P1_primitive(self):
     primitive_xray_structure = self.xray_structure.primitive_setting()
     P1_primitive_xray_structure = primitive_xray_structure.expand_to_p1()
